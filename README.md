@@ -4,7 +4,7 @@ A userscript that shows [Jiten](https://jiten.moe) stats such as character count
 
 A Jiten API key is optional but recommended. It adds your own stats (coverage, progress, unknown words), lets you set your Jiten status from the page, checks for existing requests, and raises the rate limit. Sentence coverage also needs Jiten+.
 
-Stats can be turned on or off and reordered, each site can show the stats in the page, in the bottom right or not at all, and titles can be shown in Japanese, Romaji or English.
+Stats can be turned on or off and reordered, each site can show the stats in the page, in the bottom right or not at all, and titles can be shown in Romaji (the default, as on Jiten), Japanese or English.
 
 ## Install
 

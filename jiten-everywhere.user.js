@@ -616,7 +616,7 @@
 
   const SETTING_FIELDS = [
     { key: 'apiKey', label: 'Key', type: 'password', def: '' },
-    { key: 'titleLanguage', label: 'Jiten titles in', type: 'choice', def: 'japanese',
+    { key: 'titleLanguage', label: 'Jiten titles in', type: 'choice', def: 'romaji',
       options: [['japanese', 'Japanese'], ['romaji', 'Romaji'], ['english', 'English']] },
     { key: 'readingSpeed', label: 'Reading speed (characters per hour)', type: 'number', def: 14000 },
     { key: 'showStatus', label: 'Jiten status and favourite (needs API key)', type: 'checkbox', stat: true, def: true },
