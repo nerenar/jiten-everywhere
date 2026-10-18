@@ -9,7 +9,7 @@ Stats can be turned on or off and reordered, each site can show the stats in the
 ## Install
 
 1. Install [Violentmonkey](https://violentmonkey.github.io/), [Tampermonkey](https://www.tampermonkey.net/) or [Greasemonkey](https://www.greasespot.net/).
-2. Install the script from [Greasy Fork](https://greasyfork.org/en/scripts/600899-jiten-everywhere).
+2. Install the script from [Greasy Fork](https://greasyfork.org/en/scripts/600904-jiten-everywhere).
 
 ## License
 

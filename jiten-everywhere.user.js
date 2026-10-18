@@ -32,6 +32,8 @@
 // @grant        GM.openInTab
 // @connect      api.jiten.moe
 // @connect      graphql.anilist.co
+// @downloadURL  https://update.greasyfork.org/scripts/600904/Jiten%20Everywhere.user.js
+// @updateURL    https://update.greasyfork.org/scripts/600904/Jiten%20Everywhere.meta.js
 // ==/UserScript==
 
 (function () {
