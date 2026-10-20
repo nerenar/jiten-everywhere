@@ -2,8 +2,8 @@
 // @name         Jiten Everywhere
 // @namespace    https://github.com/nerenar/jiten-everywhere
 // @license      MIT
-// @version      0.1.0
-// @description  Show Jiten stats (character count, difficulty, coverage...) on VNDB, AniList, MyAnimeList, TMDB, IMDb, Letterboxd, IGDB, Syosetu and Bookmeter, and request missing works on Jiten with the form prefilled.
+// @version      0.2.0
+// @description  Show Jiten stats (character count, difficulty, coverage...) on VNDB, AniList, MyAnimeList, TMDB, IMDb, Letterboxd, Simkl, IGDB, Steam, Syosetu and Bookmeter, and request missing works on Jiten with the form prefilled.
 // @author       nerenar
 // @match        https://vndb.org/*
 // @match        https://anilist.co/*
@@ -14,6 +14,8 @@
 // @match        https://www.imdb.com/*
 // @match        https://letterboxd.com/film/*
 // @match        https://www.igdb.com/*
+// @match        https://store.steampowered.com/app/*
+// @match        https://simkl.com/*
 // @match        https://ncode.syosetu.com/*
 // @match        https://bookmeter.com/books/*
 // @match        https://jiten.moe/*
@@ -32,6 +34,8 @@
 // @grant        GM.openInTab
 // @connect      api.jiten.moe
 // @connect      graphql.anilist.co
+// @connect      api.vndb.org
+// @connect      query.wikidata.org
 // @downloadURL  https://update.greasyfork.org/scripts/600904/Jiten%20Everywhere.user.js
 // @updateURL    https://update.greasyfork.org/scripts/600904/Jiten%20Everywhere.meta.js
 // ==/UserScript==
@@ -267,6 +271,55 @@
     return m && clean(m[1]).length >= 2 ? clean(m[1]) : null;
   }
 
+  const JP_VERSION_NOTE = 'Only request it if there\'s a Japanese version.';
+
+  // Japanese text: a tick under Interface or Subtitles. Audio alone doesn't count.
+  const JAPANESE_NAME = /^(?:japanese|japonais|japanisch|japonés|giapponese|japonês|japoński|japans|japanska|japansk|japani|japonca|японский|日本語|日语|日語|일본어|ญี่ปุ่น|tiếng nhật)$/i;
+  // "Visual Novel" tag (3799): top five, with 40% of the top tag's votes. VN-like games carry it lower.
+  function steamTags(doc) {
+    const src = $$(doc, 'script').map((n) => n.textContent).find((t) => t.includes('InitAppTagModal('));
+    const m = src && /InitAppTagModal\(\s*\d+,\s*(\[[\s\S]*?\])\s*,/.exec(src);
+    try { return m ? JSON.parse(m[1]) : []; } catch { return []; }
+  }
+  function steamVnTagged(tags) {
+    const top = tags[0]?.count || 0;
+    const i = tags.findIndex((t) => t.tagid === 3799);
+    return i >= 0 && i < 5 && top > 0 && tags[i].count >= 0.4 * top;
+  }
+
+  function igdbJapanTitle(doc) {
+    const head = $$(doc, 'h6').find((h) => clean(h.textContent) === 'Localized Titles');
+    const line = head && [...head.parentElement.querySelectorAll('p')].find((p) => /^Japan:?$/.test(clean(p.querySelector('strong')?.textContent)));
+    return line ? clean(line.textContent).replace(/^Japan:\s*/, '') || null : null;
+  }
+  // The table shows only a few languages; the page data lists each once per kind, so two or more is text.
+  function igdbHasJapaneseText(doc) {
+    const ld = $$(doc, 'script[type="application/ld+json"]').map((n) => { try { return JSON.parse(n.textContent); } catch { return null; } })
+      .find((d) => Array.isArray(d?.inLanguage));
+    if (ld && ld.inLanguage.filter((l) => l === 'Japanese').length >= 2) return true;
+    const table = $(doc, 'table.language-supports-table');
+    if (!table) return false;
+    const cols = [...table.querySelectorAll('th')].map((th) => clean(th.textContent));
+    const text = cols.flatMap((c, i) => (/^(subtitles|interface)$/i.test(c) ? [i] : []));
+    return [...table.querySelectorAll('tbody tr')].some((tr) => {
+      const cells = [...tr.querySelectorAll('td')];
+      return /^japanese:?$/i.test(clean(cells[0]?.textContent)) && text.some((i) => clean(cells[i]?.textContent));
+    });
+  }
+
+  // DLC and soundtracks have a banner; software and videos a category in the breadcrumb.
+  function steamNotAGame(doc) {
+    if ($(doc, '.game_area_dlc_bubble, .game_area_soundtrack_bubble')) return true;
+    return /[?&]category1=/.test($(doc, '.blockbg a')?.getAttribute('href') || '');
+  }
+
+  function steamHasJapaneseText(doc) {
+    return $$(doc, 'table.game_language_options tr').some((tr) => {
+      const cells = [...tr.querySelectorAll('td')];
+      return JAPANESE_NAME.test(clean(cells[0]?.textContent)) && [1, 3].some((i) => clean(cells[i]?.textContent));
+    });
+  }
+
   const SITES = [
     {
       id: 'vndb',
@@ -461,6 +514,56 @@
       mount: (doc) => panelAt(doc, [['aside.sidebar .ratings-histogram-chart', 'after'], ['aside.sidebar', 'append']]),
     },
     {
+      id: 'simkl',
+      types: [MT.ANIME, MT.DRAMA, MT.MOVIE],
+      name: 'Simkl',
+      radius: 6,
+      dark: true,
+      // Simkl's own pop-ups sit in the bottom right, its share bar along the bottom.
+      corner: 'left',
+      palette: () => ({ bg: 'rgba(41,49,56,0.32)', line: 'rgba(255,255,255,0.14)', fg: 'rgb(230,230,230)', muted: 'rgb(158,158,158)',
+        accent: 'rgb(138,164,221)' }),
+      cornerBottom: 96,
+      css: '.je{font-family:"open sans",Arial,Helvetica,sans-serif;font-size:14px;padding:12px;max-width:none}',
+      hosts: ['simkl.com'],
+      match(u) {
+        const m = /^\/(anime|tv|movies)\/(\d+)(?:\/[^/]*)?\/?$/.exec(u.pathname);
+        return m && { linkType: null, kind: m[1], id: m[2], url: `https://simkl.com/${m[1]}/${m[2]}` };
+      },
+      async collect(ref, doc) {
+        // Simkl swaps pages in without reloading: wait for this one's content before reading it.
+        const self = `a[href^="/${ref.kind}/${ref.id}/"]`;
+        for (let i = 0; i < 30 && !$(doc, self); i++) await sleep(100);
+        const row = (label) => {
+          const td = $$(doc, '.SimklTVAboutTabsDetails td').find((n) => clean(n.textContent) === `${label}:`);
+          return clean(td?.nextElementSibling?.textContent) || null;
+        };
+        const linkOf = (type) => $$(doc, '.SimklTVAboutTabsDetailsLinks a').map((a) => parseLinkKey(type, a.href)).find(Boolean);
+        const refs = [];
+        const add = (type, url) => { const k = linkOf(type); if (k) refs.push({ ...k, url: url(k) }); };
+        add(LINK.ANILIST, (k) => `https://anilist.co/${k.kind}/${k.id}`);
+        add(LINK.MAL, (k) => `https://myanimelist.net/${k.kind}/${k.id}`);
+        add(LINK.TMDB, (k) => `https://www.themoviedb.org/${k.kind}/${k.id}`);
+        add(LINK.IMDB, (k) => `https://www.imdb.com/title/${k.id}/`);
+        const origin = `${row('Country') || ''} ${row('Language') || ''}`.trim();
+        // Simkl's anime section has Chinese and Korean animation too; without a country, assume Japanese.
+        const japan = /japan|japanese/i.test(origin) || (ref.kind === 'anime' && !origin);
+        // The small title under the heading (often the original), then "Other Titles".
+        const others = [textOf(doc, 'h2.headDetail'), ...(row('Other Titles') || '').split(/\s*,\s*/)].filter(Boolean);
+        const jp = others.find(hasKana) || (japan ? others.find(hasJapanese) : null) || null;
+        const main = textOf(doc, 'h1.headDetail') || ogTitle(doc);
+        const anime = ref.kind === 'anime';
+        return {
+          mediaType: anime ? MT.ANIME : ref.kind === 'tv' ? MT.DRAMA : MT.MOVIE,
+          titles: { jp, main, english: main },
+          extraRefs: refs,
+          requestUrl: refs[0]?.url || null,
+          requestNote: japan || jp ? '' : JP_VERSION_NOTE,
+        };
+      },
+      mount: (doc) => panelAt(doc, [['table.SimklTVRightBlockFriendsRatingsBl', 'before'], ['#detailRightSidebar', 'append']]),
+    },
+    {
       id: 'imdb',
       types: [MT.MOVIE, MT.DRAMA, MT.ANIME, MT.VIDEOGAME],
       name: 'IMDb',
@@ -512,12 +615,80 @@
       },
       async collect(ref, doc) {
         for (let i = 0; i < 30 && !textOf(doc, 'h1'); i++) await sleep(100);
+        const detailsReady = () => $$(doc, 'h6').some((h) => clean(h.textContent) === 'Localized Titles');
+        for (let i = 0; i < 40 && !detailsReady(); i++) await sleep(100);
         const main = cleanPageTitle(textOf(doc, 'h1') || rawOgTitle(doc) || doc.title);
         const vn = !!$(doc, 'a[href*="/genres/visual-novel"]');
-        return { mediaType: vn ? MT.VN : MT.VIDEOGAME, titles: { main } };
+        const jp = igdbJapanTitle(doc);
+        return {
+          mediaType: vn ? MT.VN : MT.VIDEOGAME,
+          titles: { jp: hasJapanese(jp) ? jp : null, main },
+          requestNote: jp || igdbHasJapaneseText(doc) ? '' : JP_VERSION_NOTE,
+        };
       },
+      requestNote: JP_VERSION_NOTE,
       cornerOnly: true,
       mount: () => null,
+    },
+    {
+      id: 'steam',
+      types: [MT.VIDEOGAME, MT.VN],
+      name: 'Steam',
+      radius: 0,
+      dark: true,
+      palette: () => ({ bg: 'rgba(0,0,0,0.58)', line: 'rgba(255,255,255,0.08)', fg: 'rgb(198,212,223)', muted: 'rgb(143,152,160)',
+        accent: 'rgb(103,193,245)' }),
+      css: `.je{border:0;padding:16px;margin:0 0 8px;max-width:none;font-family:Arial,Helvetica,sans-serif;font-size:14px;
+        background:linear-gradient(90deg,rgba(0,0,0,.5) 5%,rgba(0,0,0,.65) 95%);-webkit-backdrop-filter:blur(7px);backdrop-filter:blur(7px)}`,
+      // Steam restyles its blocks at narrow widths, so copy a real one.
+      skin(box, doc) {
+        const block = $(doc, '.rightcol.game_meta_data #category_block') || $(doc, '.rightcol.game_meta_data .block');
+        if (!block) return;
+        const cs = getComputedStyle(block);
+        for (const k of ['background-color', 'background-image', 'backdrop-filter', '-webkit-backdrop-filter', 'border-radius',
+          'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'margin-left', 'margin-right', 'margin-bottom']) {
+          box.style.setProperty(k, cs.getPropertyValue(k));
+        }
+      },
+      // Level with the top of the left column.
+      align(host, doc) {
+        const left = $(doc, '.leftcol.game_description_column');
+        const first = left && [...left.children].find((n) => n.getBoundingClientRect().height > 0);
+        const col = host.parentElement;
+        if (!first || !col) return;
+        host.style.marginTop = '';
+        col.style.marginTop = '';
+        const gap = Math.round(first.getBoundingClientRect().top - host.getBoundingClientRect().top);
+        if (gap > 0 && gap < 300) host.style.marginTop = `${gap}px`;
+        else if (gap < 0 && gap > -60) col.style.marginTop = `${parseFloat(getComputedStyle(col).marginTop) + gap}px`;
+      },
+      hosts: ['store.steampowered.com'],
+      match(u, doc) {
+        const m = /^\/app\/(\d+)(?:\/|$)/.exec(u.pathname);
+        if (!m || (doc && steamNotAGame(doc))) return null;
+        return { linkType: null, kind: null, id: m[1], url: `https://store.steampowered.com/app/${m[1]}/` };
+      },
+      async collect(ref, doc) {
+        const main = textOf(doc, '#appHubAppName') || clean(doc.title).replace(/\s+on Steam$/i, '');
+        const { vns, igdb, ja } = await steamLookup(ref.id);
+        const vnRefs = vns.slice(0, 3).map((v) => ({ linkType: LINK.VNDB, kind: null, id: v.id, url: `https://vndb.org/${v.id}` }));
+        const igdbRef = igdb ? { linkType: LINK.IGDB, kind: null, id: igdb.toLowerCase(), url: `https://www.igdb.com/games/${igdb}` } : null;
+        const vn = vns.length === 1 ? vns[0] : null;
+        const jp = [vn?.alttitle, ja].find(hasJapanese) || null;
+        const requestUrl = (vnRefs.length === 1 ? vnRefs[0] : igdbRef)?.url || null;
+        // VNDB has nearly every VN on Steam; Steam's tags catch ones it hasn't added yet.
+        const isVn = vns.length > 0 || steamVnTagged(steamTags(doc));
+        return {
+          mediaType: isVn ? MT.VN : MT.VIDEOGAME,
+          titles: { jp, main, romaji: vn?.title || null, english: main },
+          extraRefs: [...vnRefs, ...(igdbRef ? [igdbRef] : [])],
+          requestUrl,
+          requestNote: [steamHasJapaneseText(doc) ? '' : JP_VERSION_NOTE,
+            requestUrl ? '' : 'No IGDB link found. If you request it, please add one.'].filter(Boolean).join(' '),
+        };
+      },
+      requestNote: JP_VERSION_NOTE,
+      mount: (doc) => panelAt(doc, [['.rightcol.game_meta_data', 'prepend']]),
     },
     {
       id: 'syosetu',
@@ -641,7 +812,7 @@
     { key: 'showRequestButton', label: '"Request on Jiten" link', type: 'checkbox', def: true },
     ...SITES.map((site) => ({
       key: `placement_${site.id}`, label: site.name, type: 'choice', site: site.id, def: site.cornerOnly ? 'corner' : 'inline',
-      options: [['off', 'Off'], ...(site.cornerOnly ? [] : [['inline', 'In page']]), ['corner', 'Bottom right']],
+      options: [['off', 'Off'], ...(site.cornerOnly ? [] : [['inline', 'In page']]), ['corner', site.corner === 'left' ? 'Bottom left' : 'Bottom right']],
     })),
   ];
   const placementOf = (site) => settings.get(`placement_${site.id}`);
@@ -689,6 +860,8 @@
   const HOSTS = {
     'api.jiten.moe': { name: 'Jiten', gap: 120 },
     'graphql.anilist.co': { name: 'AniList', gap: 700 },
+    'api.vndb.org': { name: 'VNDB', gap: 1500 },
+    'query.wikidata.org': { name: 'Wikidata', gap: 1000 },
   };
   const MAX_RETRY_WAIT = 10000;
   const hostState = {};
@@ -781,6 +954,31 @@
     }
   }
 
+  // Steam app → VNDB (visual novels) and Wikidata (IGDB id, Japanese title).
+  const vndbSteamVns = (r) => [...new Map((r?.results || []).flatMap((rel) => rel.vns || []).map((v) => [v.id, v])).values()];
+
+  function wikidataSteam(r) {
+    const rows = r?.results?.bindings || [];
+    const value = (k) => rows.map((b) => b[k]?.value).find(Boolean) || null;
+    return { igdb: value('igdb'), ja: value('ja') };
+  }
+
+  async function steamLookup(appId) {
+    const vndb = request({
+      method: 'POST', url: 'https://api.vndb.org/kana/release',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ filters: ['extlink', '=', ['steam', Number(appId)]], fields: 'vns.id,vns.title,vns.alttitle', results: 10 }),
+    }).then(vndbSteamVns, () => []);
+    const query = `SELECT ?igdb ?ja WHERE { ?item wdt:P1733 "${Number(appId)}". OPTIONAL { ?item wdt:P5794 ?igdb }
+      OPTIONAL { ?item rdfs:label ?ja FILTER(LANG(?ja) = "ja") } } LIMIT 5`;
+    const wikidata = request({
+      url: `https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`,
+      headers: { Accept: 'application/sparql-results+json', 'Api-User-Agent': `${CLIENT_NAME} (https://github.com/nerenar/jiten-everywhere)` },
+    }).then(wikidataSteam, () => ({ igdb: null, ja: null }));
+    const [vns, wd] = await Promise.all([vndb, wikidata]);
+    return { vns, ...wd };
+  }
+
   // ---------------------------------------------------------------------------
   // Jiten API
   // ---------------------------------------------------------------------------
@@ -856,7 +1054,7 @@
   // with an API key Jiten's own duplicate check (decks and open requests) runs as well.
   // Any failure throws, so the caller shows an error rather than a request button.
   async function checkJiten({ refs, info }, api) {
-    const linked = await Promise.all(refs.map(async (ref) => (await api.byLinkId(ref)).slice(0, 8).map((id) => ({ id, ref }))));
+    const linked = await Promise.all(refs.filter((r) => r.linkType).map(async (ref) => (await api.byLinkId(ref)).slice(0, 8).map((id) => ({ id, ref }))));
     const seen = new Set();
     const candidates = linked.flat().filter(({ id }) => !seen.has(id) && seen.add(id));
     const decks = new Map();
@@ -1023,7 +1221,7 @@
 
   const exported = {
     LINK, MT, COMPATIBLE, SITES, localDate, parseLinkKey, sameKey, deckHasLink, matchPage, normalizeTitle, titleStrength,
-    anilistJapaneseTitle, anilistMediaType, malMediaType, screenMediaType, formatTime, formatSpeech, difficultyText,
+    anilistJapaneseTitle, anilistMediaType, vndbSteamVns, wikidataSteam, steamHasJapaneseText, steamVnTagged, malMediaType, screenMediaType, formatTime, formatSpeech, difficultyText,
     statRows, checkJiten, requestTitle, titleVariants, mainTitlePart, DEFAULTS, siteDefaults, statOrder, STAT_KEYS, deckTitle, bookmeterTitle, seriesTitle, cleanPageTitle,
   };
   if (typeof module === 'object' && module && module.exports) {
@@ -1182,14 +1380,19 @@
       for (const k of keys) if (theme.palette[k]) c[k] = theme.palette[k];
     }
     for (const k of keys) c[k] = toRgb(c[k]);
+    const site = SITES.find((x) => x.hosts.some((h) => hostIs(location.hostname, h)));
+    const glass = !!(box?.classList.contains('glass') || site?.glass);
+    if (!glass && parseRgb(c.bg)?.a < 1) {
+      const host = box?.getRootNode?.().host;
+      c.bg = blendOver(c.bg, backgroundAt(host?.parentElement || document.body) || (dark ? [28, 30, 36] : [255, 255, 255]));
+    }
     const bg = parseRgb(c.bg)?.rgb || (dark ? [28, 30, 36] : [255, 255, 255]);
     const over = (color, a) => blendOver(withAlpha(color, a), bg);
     if (!(parseRgb(c.line)?.a > 0.2)) c.line = over(c.fg, 0.18);
-    const site = SITES.find((x) => x.hosts.some((h) => hostIs(location.hostname, h)));
     return {
       dark,
-      glass: !!(box?.classList.contains('glass') || site?.glass),
-      vars: { ...c, field: over(c.fg, 0.07), hover: over(c.fg, 0.1), here: withAlpha(c.accent, 0.15),
+      glass,
+      vars: { ...c, field: over(c.fg, 0.07), hover: over(c.fg, 0.1),
         onaccent: isDarkColor(parseRgb(c.accent)?.rgb || [0, 0, 0]) ? '#fff' : '#111' },
     };
   }
@@ -1210,6 +1413,7 @@
     border:1px solid var(--line);border-radius:var(--je-r,8px);padding:10px 12px;margin:12px 0;box-sizing:border-box;text-align:left;max-width:460px}
   .je[data-theme=dark]{--bg:#1c1e24;--fg:#e4e6eb;--muted:#a0a6b0;--line:#363a44;--accent:#8b8cf8;--warn:#f0b35a}
   .je.glass{-webkit-backdrop-filter:blur(24px) saturate(1.3);backdrop-filter:blur(24px) saturate(1.3)}
+  .je.floating.left{right:auto;left:16px}
   .je.floating{position:fixed;right:16px;bottom:16px;width:min(320px,calc(100vw - 32px));max-height:70vh;overflow:auto;margin:0;
     z-index:2147483000;box-shadow:0 8px 28px rgba(0,0,0,.28)}
   .je-head{display:flex;align-items:center;gap:8px;font-weight:700;margin-bottom:6px}
@@ -1259,6 +1463,7 @@
   `;
 
   const SHARED_CSS = `
+  .je-request-note{display:block;flex-basis:100%}
   .je-icon{background:none;border:0;padding:0 2px;margin:0;cursor:pointer;color:inherit;opacity:.65;font:inherit;line-height:0;vertical-align:-0.15em}
   .je-icon svg{display:block}
   .je-status-ctl{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;max-width:100%}
@@ -1317,7 +1522,6 @@
   summary{cursor:pointer;color:var(--fg)}
   .sites{display:flex;flex-direction:column;gap:6px;margin-top:8px}
   .siterow{display:grid;grid-template-columns:6.5em 1fr;align-items:center;gap:8px}
-  .siterow.here{background:var(--here);border-radius:var(--je-rs,6px);margin:0 -6px;padding:3px 6px}
   .siterow .seg button{padding:4px 6px;font-size:12px;white-space:nowrap;flex:auto}
   .sep{border-top:1px solid var(--line);margin:2px 0}
   button{padding:5px 12px;border-radius:var(--je-rs,6px);border:1px solid var(--line);background:var(--field);color:var(--fg);cursor:pointer;font:inherit}
@@ -1357,8 +1561,7 @@
             onSettingsChanged();
           },
         }, text));
-        const here = f.site && SITES.find((x) => x.hosts.some((h) => hostIs(location.hostname, h)))?.id === f.site;
-        return el('div', { class: f.site ? 'siterow' + (here ? ' here' : '') : 'col', title: here ? 'The site you\'re on' : null }, el('span', {}, f.label), el('div', { class: 'seg', role: 'group', 'aria-label': f.label }, buttons));
+        return el('div', { class: f.site ? 'siterow' : 'col' }, el('span', {}, f.label), el('div', { class: 'seg', role: 'group', 'aria-label': f.label }, buttons));
       }
       const input = el('input', { type: f.type, min: f.type === 'number' ? 1000 : null, step: f.type === 'number' ? 500 : null,
         autocomplete: f.type === 'password' ? 'off' : null });
@@ -1446,7 +1649,11 @@
       });
       statList.append(line);
     }
-    const siteRows = SETTING_FIELDS.filter((f) => f.site).map(fieldFor);
+    const hereId = SITES.find((x) => x.hosts.some((h) => hostIs(location.hostname, h)))?.id;
+    const siteFields = SETTING_FIELDS.filter((f) => f.site);
+    const hereField = siteFields.find((f) => f.site === hereId);
+    const hereRow = hereField && fieldFor({ ...hereField, site: null, label: `Stats on ${hereField.label}` });
+    const otherRows = siteFields.filter((f) => f !== hereField).map(fieldFor);
     const keySummary = el('summary', {});
     const showKeyState = () => { keySummary.textContent = `Jiten API key${clean(settings.get('apiKey')) ? ' (set)' : ' (optional)'}`; };
     showKeyState();
@@ -1478,7 +1685,8 @@
       el('details', {}, el('summary', {}, 'Stats to show'), el('div', { class: 'sites' }, el('div', { class: 'note' }, 'Drag a line to reorder.'), statList)),
       requestField,
       el('div', { class: 'sep' }),
-      el('details', {}, el('summary', {}, 'Where the stats show'), el('div', { class: 'sites' }, siteRows)));
+      hereRow,
+      el('details', {}, el('summary', {}, hereRow ? 'Other sites' : 'Where the stats show'), el('div', { class: 'sites' }, otherRows)));
     const theme = settingsColors(anchor);
     for (const [k, v] of Object.entries(theme.vars)) pop.style.setProperty(`--${k}`, v);
     pop.style.colorScheme = theme.dark ? 'dark' : 'light';
@@ -1709,7 +1917,9 @@
       : result.state === 'requested' ? 'Different work? Request it on Jiten'
       : !result.matches.length ? 'Request on Jiten'
         : shownMatches(result).count === 1 ? 'Not this? Request it on Jiten' : 'None of these? Request it on Jiten';
-    return el('a', { href: `${JITEN}/requests/new`, class: 'je-request', onclick: (e) => { e.preventDefault(); view.request(); } }, label);
+    const a = el('a', { href: `${JITEN}/requests/new`, class: 'je-request', onclick: (e) => { e.preventDefault(); view.request(); } }, label);
+    const note = view.page?.info?.requestNote ?? view.site.requestNote;
+    return note ? [a, el('span', { class: 'je-note je-request-note' }, note)] : a;
   }
 
   const clampPct = (n) => `${Math.max(0, Math.min(100, n)).toFixed(1)}%`;
@@ -1729,8 +1939,10 @@
     const root = view.shadow;
     root.replaceChildren();
     const floating = view.mountMode === 'floating';
+    const css = PANEL_CSS + SHARED_CSS + (floating ? '' : view.site.css || '')
+      + (floating && view.site.cornerBottom ? `.je.floating{bottom:${view.site.cornerBottom}px}` : '');
     const wide = !floating && view.site.wide;
-    const box = el('div', { class: 'je' + (floating ? ' floating' : '') + (wide ? ' wide' : '') + (floating && view.collapsed ? ' collapsed' : '') });
+    const box = el('div', { class: 'je' + (floating ? ' floating' : '') + (floating && view.site.corner === 'left' ? ' left' : '') + (wide ? ' wide' : '') + (floating && view.collapsed ? ' collapsed' : '') });
     if (!floating && view.site.flat) {
       box.classList.add('flat');
       box.style.fontFamily = getComputedStyle(document.body).fontFamily;
@@ -1740,8 +1952,12 @@
     if (view.site.glass) box.classList.add('glass');
     setVars(box, radiusVars(view.site));
     if (view.site.edge) box.style.borderTop = `3px solid ${view.site.edge}`;
+    if (!floating) view.site.skin?.(box, document);
     if (view.site.band && !floating && !dark) { box.classList.add('band'); box.style.setProperty('--band', view.site.band); }
     for (const [k, val] of Object.entries(palette)) if (val) box.style.setProperty(`--${k}`, val);
+    if (floating && !view.site.glass && parseRgb(palette.bg)?.a < 1) {
+      box.style.setProperty('--bg', blendOver(palette.bg, backgroundAt(document.body) || (dark ? [28, 30, 36] : [255, 255, 255])));
+    }
     const toggle = floating ? el('button', {
       class: 'je-icon', title: view.collapsed ? 'Expand' : 'Collapse',
       onclick: (e) => {
@@ -1765,13 +1981,13 @@
             el('div', { class: 'je-cell-value', title: r.bar?.title }, r.value, r.bar && barNode(r.bar))))),
           others.length > 0 && el('table', {}, others.map((r) => el('tr', {}, rowNode(r)))),
           actions && el('div', { class: 'je-actions' }, actions)));
-      root.append(el('style', {}, PANEL_CSS + SHARED_CSS), box);
+      root.append(el('style', {}, css), box);
       return;
     }
     const look = !floating && view.site.native?.(document);
     if (look) {
       renderNative(view, box, look, rows, gear, actions);
-      root.append(el('style', {}, PANEL_CSS + SHARED_CSS), box);
+      root.append(el('style', {}, css), box);
       return;
     }
     box.append(
@@ -1788,7 +2004,7 @@
           : r.list ? [el('tr', {}, el('td', { colspan: 2, class: 'je-listlabel' }, r.label)), el('tr', {}, el('td', { colspan: 2, class: 'je-list' }, r.value))]
             : [el('tr', {}, rowNode(r))]))),
         actions && el('div', { class: 'je-actions' }, actions)));
-    root.append(el('style', {}, PANEL_CSS + SHARED_CSS), box);
+    root.append(el('style', {}, css), box);
   }
 
   function renderNative(view, box, look, rows, gear, actions) {
@@ -1857,12 +2073,15 @@
     }
   }
 
+  const FALLBACK_AFTER = 3000;
+
   function startView({ site, ref }, key) {
     const view = {
       key, site, ref,
       result: { state: 'loading' },
       collapsed: (() => { try { return !!localStorage.getItem('je-collapsed'); } catch { return false; } })(),
       destroyed: false,
+      startedAt: Date.now(),
     };
 
     view.unmount = () => {
@@ -1876,9 +2095,22 @@
       const floating = placementOf(site) === 'corner';
       const mounted = view.mountMode === 'rows' ? view.trs?.[0]?.isConnected : view.host?.isConnected;
       if (mounted && (view.mountMode === 'floating') === floating) return;
+      if (!mounted && (view.mountMode === 'panel' || view.mountMode === 'rows')) {
+        view.unmount();
+        view.startedAt = Date.now();
+      }
       const target = floating ? null : site.mount(document);
+      // No spot in the page: bottom right, after a few seconds for pages that build late.
+      if (!floating && !target) {
+        if (mounted) return;
+        const wait = FALLBACK_AFTER - (Date.now() - view.startedAt);
+        if (wait > 0) {
+          clearTimeout(view.retry);
+          view.retry = setTimeout(view.mount, wait + 50);
+          return;
+        }
+      }
       view.unmount();
-      if (!floating && !target) return;
       if (target?.mode === 'rows') {
         injectSharedStyles();
         view.mountMode = 'rows';
@@ -1900,10 +2132,19 @@
     view.render = () => {
       if (view.destroyed) return;
       if (view.mountMode === 'rows') renderRows(view); else if (view.shadow) renderPanel(view);
+      if (view.mountMode === 'panel') view.site.align?.(view.host, document);
+    };
+
+    view.restyle = () => {
+      if (view.destroyed || view.mountMode !== 'panel') return;
+      const box = view.shadow?.querySelector('.je');
+      if (box) view.site.skin?.(box, document);
+      view.site.align?.(view.host, document);
     };
 
     view.destroy = () => {
       view.destroyed = true;
+      clearTimeout(view.retry);
       view.unmount();
     };
 
@@ -1956,8 +2197,10 @@
   async function openRequestForm(page) {
     const ref = page.refs[0];
     const mediaType = page.info.mediaType;
-    await store.set('pendingRequest', { mediaType, title: requestTitle(page.info), url: ref.url, ts: Date.now() });
-    const url = `${JITEN}/requests/new${mediaType ? `?mediaType=${mediaType}` : ''}`;
+    // Never a Steam link: Jiten has no link type for it.
+    const link = page.info.requestUrl !== undefined ? page.info.requestUrl : ref.linkType ? ref.url : null;
+    await store.set('pendingRequest', { mediaType, title: requestTitle(page.info), url: link, ts: Date.now() });
+    const url = `${JITEN}/requests/new`;
     if (typeof GM_openInTab === 'function') {
       GM_openInTab(url, { active: true, insert: true, setParent: true });
       return null;
@@ -2057,22 +2300,22 @@
       if (!onForm) { handledPath = null; return; }
       if (handledPath || !findRequestForm()) return;
       handledPath = location.pathname;
+      // Used once, and only just after the click: a refresh or a later request form starts empty.
       const p = await store.get('pendingRequest');
-      if (!p || !(Date.now() - p.ts < 30 * 60e3)) return;
-      const queryType = Number(new URLSearchParams(location.search).get('mediaType')) || null;
-      if (queryType && p.mediaType && queryType !== p.mediaType) return;
+      if (!p) return;
+      await store.delete('pendingRequest');
+      if (!(Date.now() - p.ts < 60e3)) return;
       await waitForVueApp();
 
       // Fill, then check again a few times: a late hydration or re-render can empty the fields.
       // A field is only refilled while empty and not focused, so anything the user typed or cleared stays.
-      let typeTried = false;
       const apply = () => {
         const form = findRequestForm();
         if (!form || document.getElementById('isUpdate')?.checked) return false;
         const empty = (input) => !clean(input.value) && document.activeElement !== input;
         if (p.title && empty(form.title)) fillMarked(form.title, p.title);
         if (p.url && empty(form.url)) fillMarked(form.url, p.url);
-        if (p.mediaType && !typeTried && !currentMediaTypeLabel(form)) { typeTried = true; selectMediaType(form, MT_LABEL[p.mediaType]); }
+        if (p.mediaType && !currentMediaTypeLabel(form)) selectMediaType(form, MT_LABEL[p.mediaType]);
         return true;
       };
       if (!apply()) return;
@@ -2080,7 +2323,6 @@
         await sleep(wait);
         if (!apply()) break;
       }
-      await store.delete('pendingRequest');
     };
     new MutationObserver(debounce(tick, 150)).observe(document.body, { childList: true, subtree: true });
     tick();
@@ -2135,6 +2377,12 @@
     new MutationObserver(debounce(route, 250)).observe(document.documentElement, { childList: true, subtree: true });
     const themeObserver = new MutationObserver(debounce(() => current?.render(), 100));
     for (const n of [document.documentElement, document.body]) themeObserver.observe(n, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+    let restyling = false;
+    addEventListener('resize', () => {
+      if (restyling) return;
+      restyling = true;
+      requestAnimationFrame(() => { restyling = false; current?.restyle(); });
+    });
     route();
   }
 })();

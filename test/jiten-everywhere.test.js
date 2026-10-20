@@ -19,6 +19,9 @@ test('work pages map to the link Jiten stores', () => {
     ['https://www.igdb.com/games/star-quest-vii', { linkType: LINK.IGDB, kind: null, id: 'star-quest-vii', url: 'https://www.igdb.com/games/star-quest-vii' }],
     ['https://ncode.syosetu.com/n1234AB/', { linkType: LINK.SYOSETU, kind: null, id: 'n1234ab', url: 'https://ncode.syosetu.com/n1234ab/' }],
     ['https://bookmeter.com/books/123456', { linkType: LINK.BOOKMETER, kind: null, id: '123456', url: 'https://bookmeter.com/books/123456' }],
+    ['https://store.steampowered.com/app/123450/Star_Quest/', { linkType: null, kind: null, id: '123450', url: 'https://store.steampowered.com/app/123450/' }],
+    ['https://simkl.com/anime/37996/star-quest', { linkType: null, kind: 'anime', id: '37996', url: 'https://simkl.com/anime/37996' }],
+    ['https://simkl.com/tv/34519', { linkType: null, kind: 'tv', id: '34519', url: 'https://simkl.com/tv/34519' }],
   ];
   for (const [url, ref] of cases) assert.deepEqual(page(url)?.ref, ref, url);
 });
@@ -28,6 +31,7 @@ test('pages that are not a work, or a sub page without the info, are ignored', (
     'https://vndb.org/v123/chars', 'https://vndb.org/r123', 'https://anilist.co/home', 'https://myanimelist.net/anime/season',
     'https://www.themoviedb.org/tv/4321/season/1', 'https://www.imdb.com/title/tt1234567/reviews',
     'https://ncode.syosetu.com/n1234ab/5/', 'https://www.igdb.com/games/star-quest-vii/reviews',
+    'https://store.steampowered.com/agecheck/app/123450/', 'https://simkl.com/anime/37996/star-quest/episodes/', 'https://simkl.com/anime/', 'https://store.steampowered.com/search/?term=x',
   ]) assert.equal(page(url), null, url);
 });
 
@@ -414,4 +418,52 @@ test('progress row from the list entry', () => {
   assert.equal(progress({ ...novel, listEntry: { state: 0, charactersRead: 0, completedCount: 0 } }), undefined);
   assert.equal(progress({ mediaType: MT.VN, characterCount: 556628, listEntry: { state: 0, charactersRead: 356242, completedCount: 0 } }), '64% (356,242)');
   assert.equal(progress(novel), undefined); // no key: no list entry
+});
+
+test('Steam: VNs from VNDB releases, IGDB id and Japanese title from Wikidata', () => {
+  const vns = je.vndbSteamVns({ results: [
+    { id: 'r1', vns: [{ id: 'v12', title: 'Hoshi no Uta', alttitle: '星の唄' }] },
+    { id: 'r2', vns: [{ id: 'v12', title: 'Hoshi no Uta', alttitle: '星の唄' }] },
+  ] });
+  assert.deepEqual(vns.map((v) => v.id), ['v12']);
+  assert.deepEqual(je.vndbSteamVns({ results: [] }), []);
+  assert.deepEqual(je.wikidataSteam({ results: { bindings: [{ ja: { value: 'スタークエスト' } }, { igdb: { value: 'star-quest' } }] } }),
+    { igdb: 'star-quest', ja: 'スタークエスト' });
+  assert.deepEqual(je.wikidataSteam({ results: { bindings: [] } }), { igdb: null, ja: null });
+});
+
+test('a page ref with no Jiten link type (Steam) is never looked up by link', async () => {
+  const api = fakeApi({ links: { [`${LINK.VNDB}:v12`]: [5] }, decks: { 5: { mainDeck: { deckId: 5, mediaType: MT.VN, links: [] } } } });
+  const r = await je.checkJiten({ refs: [{ linkType: null, kind: null, id: '123450', url: 'https://store.steampowered.com/app/123450/' },
+    { linkType: LINK.VNDB, kind: null, id: 'v12' }], info: info({ main: 'Hoshi' }, MT.VN) }, api);
+  assert.equal(r.state, 'found');
+  assert.deepEqual(api.calls.filter((c) => c[0] === 'link'), [['link', LINK.VNDB, 'v12']]);
+});
+
+test('Steam: Japanese text means interface or subtitles, not audio alone', () => {
+  const row = (name, ...cols) => ({ querySelectorAll: () => [name, ...cols].map((c) => ({ textContent: c })) });
+  const doc = (...rows) => ({ querySelectorAll: () => rows });
+  assert.equal(je.steamHasJapaneseText(doc(row('English', '✔', '', '✔'), row('Japanese', '', '✔', ''))), false);
+  assert.equal(je.steamHasJapaneseText(doc(row('Japanese', '', '', '✔'))), true);
+  assert.equal(je.steamHasJapaneseText(doc(row(' 日本語 ', '✔', '', ''))), true);
+  assert.equal(je.steamHasJapaneseText(doc()), false);
+});
+
+test('Steam: the Visual Novel tag counts in the top five with 40% of the top tag\'s votes', () => {
+  const tags = (...list) => list.map(([tagid, count]) => ({ tagid, count }));
+  assert.equal(je.steamVnTagged(tags([3799, 855], [21, 600])), true);
+  assert.equal(je.steamVnTagged(tags([21, 561], [3799, 501])), true);
+  assert.equal(je.steamVnTagged(tags([1, 100], [2, 90], [3, 80], [4, 70], [5, 60], [3799, 59])), false);
+  assert.equal(je.steamVnTagged(tags([21, 1597], [3799, 290])), false);
+  assert.equal(je.steamVnTagged(tags([21, 10])), false);
+  assert.equal(je.steamVnTagged([]), false);
+});
+
+test('Steam: DLC, soundtracks and software pages are skipped', () => {
+  const doc = (els) => ({ querySelector: (sel) => els[sel] || null });
+  const url = 'https://store.steampowered.com/app/123450/';
+  const crumb = (href) => ({ getAttribute: () => href });
+  assert.ok(page(url, doc({ '.blockbg a': crumb('https://store.steampowered.com/search/?term=&snr=1') })));
+  assert.equal(page(url, doc({ '.game_area_dlc_bubble, .game_area_soundtrack_bubble': {} })), null);
+  assert.equal(page(url, doc({ '.blockbg a': crumb('https://store.steampowered.com/search/?category1=994&snr=1') })), null);
 });
