@@ -2,7 +2,7 @@
 // @name         Jiten Everywhere
 // @namespace    https://github.com/nerenar/jiten-everywhere
 // @license      MIT
-// @version      0.3.0
+// @version      0.3.1
 // @description  Show Jiten stats useful for Japanese learners (character count, difficulty, coverage...) on VNDB, AniList, MyAnimeList, TMDB, IMDb, Letterboxd, Simkl, MyDramaList, AniDB, IGDB, Steam, Syosetu and Bookmeter, and request missing works on Jiten with the form prefilled.
 // @author       nerenar
 // @match        https://vndb.org/*
@@ -614,8 +614,9 @@
         return { fg: cs.color, line: cs.borderTopColor, accent: link ? getComputedStyle(link).color : null };
       },
       skin(box, doc) {
-        const spot = mdlSpot(doc);
-        const side = !!spot?.node.closest('.content-side');
+        const corner = box.classList.contains('floating');
+        const spot = corner ? null : mdlSpot(doc);
+        const side = corner ? !!$(doc, '.content-side .box-header.primary') : !!spot?.node.closest('.content-side');
         const head = side ? $(doc, '.content-side .box-header.primary') : $(doc, '.col-rightx > .box > .box-header.light-b-dk');
         const body = side ? $(doc, '.content-side .box-body.light-b') : head?.parentElement;
         if (!head) return;
@@ -624,8 +625,9 @@
         box.style.setProperty('--band', hs.backgroundColor);
         box.style.setProperty('--head-fg', hs.color);
         if (body) box.style.backgroundColor = getComputedStyle(body).backgroundColor;
-        box.style.marginBottom = getComputedStyle(spot.node).marginBottom;
+        if (spot) box.style.marginBottom = getComputedStyle(spot.node).marginBottom;
       },
+      cornerSkin: true,
       align(host, doc) {
         const spot = mdlSpot(doc);
         if (!spot || (spot.where === 'after' ? spot.node.nextElementSibling : spot.node.previousElementSibling) === host) return;
@@ -633,10 +635,14 @@
         const box = host.shadowRoot?.querySelector('.je');
         if (box) this.skin(box, doc);
       },
-      css: `.je{font-family:lato,Helvetica,Arial,sans-serif;font-size:14px;line-height:21px;padding:11.2px 16px;margin:0 0 24px;max-width:none;
-        box-shadow:0 1px 1px rgba(0,0,0,.1)}
+      css: `.je{margin:0 0 24px;max-width:none;box-shadow:0 1px 1px rgba(0,0,0,.1)}`,
+      bothCss: `.je{font-family:lato,Helvetica,Arial,sans-serif;font-size:14px;line-height:21px;padding:11.2px 16px}
         .je.band .je-head{margin:-11.2px -16px 11.2px;padding:11.2px 16px;border:0;color:var(--head-fg);font-size:16px;line-height:16px}
-        .je.band .je-head .je-icon{color:inherit}`,
+        .je.band.collapsed .je-head{margin:-11.2px -16px}
+        .je.floating{border:0}
+        .je.band .je-head .je-icon{color:inherit}
+        td:first-child:not([colspan]),td.je-listlabel{color:var(--fg);font-weight:700}
+        td:first-child:not([colspan])::after,td.je-listlabel::after{content:":"}`,
       hosts: ['mydramalist.com'],
       match(u) {
         const m = /^\/(\d+)(?:-[^/]*)?\/?$/.exec(u.pathname);
@@ -2228,7 +2234,7 @@
     const root = view.shadow;
     root.replaceChildren();
     const floating = view.mountMode === 'floating';
-    const css = PANEL_CSS + SHARED_CSS + (floating ? '' : view.site.css || '')
+    const css = PANEL_CSS + SHARED_CSS + (floating ? '' : view.site.css || '') + (view.site.bothCss || '')
       + (floating && view.site.cornerBottom ? `.je.floating{bottom:${view.site.cornerBottom}px}` : '');
     const wide = !floating && view.site.wide;
     const box = el('div', { class: 'je' + (floating ? ' floating' : '') + (floating && view.site.corner === 'left' ? ' left' : '') + (wide ? ' wide' : '') + (floating && view.collapsed ? ' collapsed' : '') });
@@ -2241,7 +2247,7 @@
     if (view.site.glass) box.classList.add('glass');
     setVars(box, radiusVars(view.site));
     if (view.site.edge) box.style.borderTop = `3px solid ${view.site.edge}`;
-    if (!floating) view.site.skin?.(box, document);
+    if (!floating || view.site.cornerSkin) view.site.skin?.(box, document);
     if (view.site.band && !floating && !dark) { box.classList.add('band'); box.style.setProperty('--band', view.site.band); }
     for (const [k, val] of Object.entries(palette)) if (val) box.style.setProperty(`--${k}`, val);
     if (floating && !view.site.glass && parseRgb(palette.bg)?.a < 1) {
