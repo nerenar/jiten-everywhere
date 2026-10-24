@@ -2,8 +2,8 @@
 // @name         Jiten Everywhere
 // @namespace    https://github.com/nerenar/jiten-everywhere
 // @license      MIT
-// @version      0.2.0
-// @description  Show Jiten stats (character count, difficulty, coverage...) on VNDB, AniList, MyAnimeList, TMDB, IMDb, Letterboxd, Simkl, IGDB, Steam, Syosetu and Bookmeter, and request missing works on Jiten with the form prefilled.
+// @version      0.3.0
+// @description  Show Jiten stats useful for Japanese learners (character count, difficulty, coverage...) on VNDB, AniList, MyAnimeList, TMDB, IMDb, Letterboxd, Simkl, MyDramaList, AniDB, IGDB, Steam, Syosetu and Bookmeter, and request missing works on Jiten with the form prefilled.
 // @author       nerenar
 // @match        https://vndb.org/*
 // @match        https://anilist.co/*
@@ -16,6 +16,8 @@
 // @match        https://www.igdb.com/*
 // @match        https://store.steampowered.com/app/*
 // @match        https://simkl.com/*
+// @match        https://mydramalist.com/*
+// @match        https://anidb.net/*
 // @match        https://ncode.syosetu.com/*
 // @match        https://bookmeter.com/books/*
 // @match        https://jiten.moe/*
@@ -35,7 +37,7 @@
 // @connect      api.jiten.moe
 // @connect      graphql.anilist.co
 // @connect      api.vndb.org
-// @connect      query.wikidata.org
+// @connect      wikidata.org
 // @downloadURL  https://update.greasyfork.org/scripts/600904/Jiten%20Everywhere.user.js
 // @updateURL    https://update.greasyfork.org/scripts/600904/Jiten%20Everywhere.meta.js
 // ==/UserScript==
@@ -320,6 +322,32 @@
     });
   }
 
+  function mdlDetail(doc, label) {
+    const b = $$(doc, 'li.list-item > b').find((n) => clean(n.textContent) === `${label}:`);
+    return b ? clean(b.parentElement.textContent).slice(clean(b.textContent).length).trim() || null : null;
+  }
+
+  function mdlSpot(doc) {
+    const col = $(doc, '.col-rightx');
+    const stats = $$(doc, '.content-side > .box.hidden-sm-down').pop();
+    if (stats?.offsetParent && (!col || stats.getBoundingClientRect().left >= col.getBoundingClientRect().right - 1)) {
+      return { node: stats, where: 'after' };
+    }
+    const cast = col?.querySelector(':scope > .box.clear');
+    const watch = col?.querySelectorAll(':scope > .box')[1];
+    if (watch && watch !== cast && !watch.classList.contains('clear')) return { node: watch, where: 'before' };
+    if (cast) return { node: cast, where: 'before' };
+    const first = col?.querySelector(':scope > .box');
+    return first ? { node: first, where: 'after' } : null;
+  }
+
+  function anidbTitles(doc) {
+    const official = (lang) => $$(doc, 'tr.official').filter((tr) => tr.querySelector(`.i_audio_${lang}`))
+      .map((tr) => clean(tr.querySelector('label')?.textContent)).filter(Boolean);
+    const syn = $$(doc, 'tr.syn td').flatMap((td) => clean(td.textContent).split(/\s*,\s*/)).filter(Boolean);
+    return { main: textOf(doc, 'tr.romaji [itemprop="name"]') || null, ja: official('ja'), en: official('en')[0] || null, syn };
+  }
+
   const SITES = [
     {
       id: 'vndb',
@@ -383,6 +411,7 @@
           mediaType: anilistMediaType(m),
           titles: { jp: anilistJapaneseTitle(m), main: m.title?.romaji, romaji: m.title?.romaji, english: m.title?.english },
           extraRefs: m.idMal ? [{ linkType: LINK.MAL, kind: ref.kind, id: String(m.idMal), url: `https://myanimelist.net/${ref.kind}/${m.idMal}` }] : [],
+          ...(m.isAdult && m.idMal ? { requestUrl: `https://myanimelist.net/${ref.kind}/${m.idMal}` } : {}),
         };
       },
       mount: (doc) => panelAt(doc, [['.sidebar > .rankings', 'after'], ['.media-page-unscoped .sidebar', 'prepend'], ['.sidebar', 'prepend']]),
@@ -545,6 +574,15 @@
         add(LINK.MAL, (k) => `https://myanimelist.net/${k.kind}/${k.id}`);
         add(LINK.TMDB, (k) => `https://www.themoviedb.org/${k.kind}/${k.id}`);
         add(LINK.IMDB, (k) => `https://www.imdb.com/title/${k.id}/`);
+        const al = refs.find((r) => r.linkType === LINK.ANILIST);
+        if (al) {
+          const m = await anilistMedia('id', al.id, al.kind).catch(() => null);
+          if (m?.isAdult && m.idMal) {
+            const mal = refs.find((r) => r.linkType === LINK.MAL)
+              || { linkType: LINK.MAL, kind: al.kind, id: String(m.idMal), url: `https://myanimelist.net/${al.kind}/${m.idMal}` };
+            refs.splice(0, refs.length, mal, ...refs.filter((r) => r !== mal));
+          }
+        }
         const origin = `${row('Country') || ''} ${row('Language') || ''}`.trim();
         // Simkl's anime section has Chinese and Korean animation too; without a country, assume Japanese.
         const japan = /japan|japanese/i.test(origin) || (ref.kind === 'anime' && !origin);
@@ -562,6 +600,156 @@
         };
       },
       mount: (doc) => panelAt(doc, [['table.SimklTVRightBlockFriendsRatingsBl', 'before'], ['#detailRightSidebar', 'append']]),
+    },
+    {
+      id: 'mdl',
+      types: [MT.DRAMA, MT.MOVIE, MT.ANIME],
+      name: 'MyDramaList',
+      radius: 8,
+      palette(doc) {
+        const box = $(doc, '.content-side > .box') || $(doc, '.col-rightx > .box');
+        const link = $(doc, '.box-body a');
+        if (!box) return null;
+        const cs = getComputedStyle(box);
+        return { fg: cs.color, line: cs.borderTopColor, accent: link ? getComputedStyle(link).color : null };
+      },
+      skin(box, doc) {
+        const spot = mdlSpot(doc);
+        const side = !!spot?.node.closest('.content-side');
+        const head = side ? $(doc, '.content-side .box-header.primary') : $(doc, '.col-rightx > .box > .box-header.light-b-dk');
+        const body = side ? $(doc, '.content-side .box-body.light-b') : head?.parentElement;
+        if (!head) return;
+        const hs = getComputedStyle(head);
+        box.classList.add('band');
+        box.style.setProperty('--band', hs.backgroundColor);
+        box.style.setProperty('--head-fg', hs.color);
+        if (body) box.style.backgroundColor = getComputedStyle(body).backgroundColor;
+        box.style.marginBottom = getComputedStyle(spot.node).marginBottom;
+      },
+      align(host, doc) {
+        const spot = mdlSpot(doc);
+        if (!spot || (spot.where === 'after' ? spot.node.nextElementSibling : spot.node.previousElementSibling) === host) return;
+        spot.node[spot.where](host);
+        const box = host.shadowRoot?.querySelector('.je');
+        if (box) this.skin(box, doc);
+      },
+      css: `.je{font-family:lato,Helvetica,Arial,sans-serif;font-size:14px;line-height:21px;padding:11.2px 16px;margin:0 0 24px;max-width:none;
+        box-shadow:0 1px 1px rgba(0,0,0,.1)}
+        .je.band .je-head{margin:-11.2px -16px 11.2px;padding:11.2px 16px;border:0;color:var(--head-fg);font-size:16px;line-height:16px}
+        .je.band .je-head .je-icon{color:inherit}`,
+      hosts: ['mydramalist.com'],
+      match(u) {
+        const m = /^\/(\d+)(?:-[^/]*)?\/?$/.exec(u.pathname);
+        if (!m) return null;
+        return { linkType: null, kind: null, id: m[1], url: `https://mydramalist.com/${m[1]}` };
+      },
+      async collect(ref, doc) {
+        let ld = {};
+        try { ld = JSON.parse($(doc, 'script[type="application/ld+json"]')?.textContent || '{}'); } catch { /* ignore */ }
+        const title = clean(ld.name) || ogTitle(doc);
+        const native = mdlDetail(doc, 'Native Title');
+        const aka = (mdlDetail(doc, 'Also Known As') || '').split(/\s*,\s*/).filter(Boolean);
+        const type = mdlDetail(doc, 'Type') || '';
+        const kind = /^movie$/i.test(type) ? 'movie' : 'tv';
+        const marked = /^anime$/i.test(type) || /anim/i.test(mdlDetail(doc, 'Format') || '') || /animation/i.test(mdlDetail(doc, 'Genres') || '');
+        const japan = /^japan$/i.test(mdlDetail(doc, 'Country') || '');
+        // Chinese titles are kanji too: elsewhere only kana marks a Japanese title.
+        const jp = [native, ...aka].find(japan ? hasJapanese : hasKana) || null;
+        const year = Number(/\b(?:19|20)\d{2}\b/.exec(mdlDetail(doc, 'Aired') || mdlDetail(doc, 'Release Date') || '')?.[0]) || null;
+        const episodes = Number(mdlDetail(doc, 'Episodes')) || null;
+        const [wd, al] = await Promise.all([mdlLookup(ref.id, { slug: /^\/\d+-([^/?#]+)/.exec(doc.location?.pathname || '')?.[1], titles: japan ? [...new Set([native, ...aka].filter(hasJapanese))] : [], year, kind, episodes }),
+          marked || (jp && !/^drama$/i.test(type)) ? anilistFindAnime([jp, title, ...aka].filter(Boolean), year) : null]);
+        // A live-action film can share its title and year with a TV anime.
+        const anime = al && (marked || (kind === 'movie') === (al.format === 'MOVIE')) ? al : null;
+        const animation = marked || !!anime;
+        const tmdb = wd[kind] || wd.tv || wd.movie;
+        const tmdbKind = wd[kind] ? kind : wd.tv ? 'tv' : 'movie';
+        const alRef = anime && { linkType: LINK.ANILIST, kind: 'anime', id: String(anime.id), url: `https://anilist.co/anime/${anime.id}` };
+        const malRef = anime?.idMal && { linkType: LINK.MAL, kind: 'anime', id: String(anime.idMal), url: `https://myanimelist.net/anime/${anime.idMal}` };
+        const refs = [
+          ...(anime?.isAdult ? [malRef, alRef] : [alRef, malRef]).filter(Boolean),
+          ...(tmdb ? [{ linkType: LINK.TMDB, kind: tmdbKind, id: tmdb, url: `https://www.themoviedb.org/${tmdbKind}/${tmdb}` }] : []),
+          ...(wd.imdb ? [{ linkType: LINK.IMDB, kind: null, id: wd.imdb, url: `https://www.imdb.com/title/${wd.imdb}/` }] : []),
+        ];
+        return {
+          mediaType: screenMediaType({ kind, animation }),
+          titles: { jp, main: jp || title, romaji: aka.find((t) => /^[\p{Script=Latin}\d\s\p{P}\p{S}]+$/u.test(t)) || null, english: title },
+          extraRefs: refs,
+          requestUrl: refs[0]?.url || null,
+          requestNote: [japan || jp ? '' : JP_VERSION_NOTE,
+            refs.length ? '' : `No ${animation ? 'AniList or MyAnimeList' : 'TMDB or IMDb'} link found. If you request it, please add one.`].filter(Boolean).join(' '),
+        };
+      },
+      mount(doc) {
+        const spot = mdlSpot(doc);
+        return spot && { mode: 'panel', node: spot.node, where: spot.where };
+      },
+    },
+    {
+      id: 'anidb',
+      types: [MT.ANIME],
+      name: 'AniDB',
+      radius: 0,
+      native(doc) {
+        const rows = $$(doc, '#tab_1_pane table tr');
+        const th = rows[1]?.querySelector('th');
+        const td = rows[1]?.querySelector('td');
+        const bubble = $(doc, '#tabbed_pane > .g_bubble');
+        const head = $(doc, '.g_section.g_bubble > h2');
+        if (!th || !td || !bubble) return null;
+        const pick = (n, props) => { const cs = getComputedStyle(n); return Object.fromEntries(props.map((k) => [k, cs.getPropertyValue(k)])); };
+        const cell = ['font-family', 'font-size', 'line-height', 'padding', 'vertical-align'];
+        const a = $(doc, '#tab_1_pane td a');
+        return {
+          layout: 'table',
+          box: { ...pick(bubble, ['background-color', 'padding', 'box-shadow']),
+            margin: `${getComputedStyle($(doc, '.data > .extra > .g_section') || bubble).marginTop} 0 0` },
+          th: { ...pick(th, [...cell, 'background-color', 'color', 'font-weight', 'width']), 'border-top': pick(th, ['border-top'])['border-top'] },
+          td: { ...pick(td, [...cell, 'color']), 'border-top': pick(td, ['border-top'])['border-top'] },
+          odd: getComputedStyle(rows.find((r) => r.classList.contains('g_odd')) || rows[0]).backgroundColor,
+          body: pick(td, ['font-family', 'font-size', 'line-height', 'color']),
+          link: a ? getComputedStyle(a).color : null,
+          head: head ? { ...pick(head, ['font-family', 'font-size', 'font-weight', 'line-height', 'color', 'border-bottom', 'margin-bottom']),
+            padding: getComputedStyle(head.firstElementChild || head).padding } : {},
+        };
+      },
+      nativeCorner: true,
+      css: '.je{max-width:none}',
+      hosts: ['anidb.net'],
+      match(u, doc) {
+        const m = /^\/(?:anime\/|a)(\d+)\/?$/.exec(u.pathname)
+          || (u.pathname === '/perl-bin/animedb.pl' && u.searchParams.get('show') === 'anime' && /^(\d+)$/.exec(u.searchParams.get('aid') || ''));
+        if (!m || (doc && /^(?:music video|other)\b/i.test(textOf(doc, 'tr.type td')))) return null;
+        return m && { linkType: null, kind: null, id: m[1], url: `https://anidb.net/anime/${m[1]}` };
+      },
+      async collect(ref, doc) {
+        const t = anidbTitles(doc);
+        let mal = $$(doc, 'tr.resources a').map((a) => parseLinkKey(LINK.MAL, a.href)).find((k) => k?.kind === 'anime')?.id || null;
+        let anilist = null;
+        if (!mal) {
+          const items = await wikidataItemsWith('P5646', [ref.id]).catch(() => []);
+          mal = items.map((e) => claimValues(e, 'P4086')[0]).find(Boolean) || null;
+          anilist = items.map((e) => claimValues(e, 'P8729')[0]).find(Boolean) || null;
+        }
+        const m = (anilist && /^\d+$/.test(anilist) ? await anilistMedia('id', anilist, 'anime').catch(() => null) : null)
+          || (mal && /^\d+$/.test(mal) ? await anilistMedia('idMal', mal, 'anime').catch(() => null) : null);
+        mal = mal || (m?.idMal ? String(m.idMal) : null);
+        const alRef = m && { linkType: LINK.ANILIST, kind: 'anime', id: String(m.id), url: `https://anilist.co/anime/${m.id}` };
+        const malRef = mal && { linkType: LINK.MAL, kind: 'anime', id: mal, url: `https://myanimelist.net/anime/${mal}` };
+        const refs = (m?.isAdult ? [malRef, alRef] : [alRef, malRef]).filter(Boolean);
+        const native = m ? anilistJapaneseTitle(m) : null;
+        const jp = [native, ...t.ja, ...t.syn, ...(m?.synonyms || [])].find((x) => hasKana(x)) || [native, ...t.ja].find(hasJapanese) || null;
+        const japan = t.ja.length > 0 || m?.countryOfOrigin === 'JP';
+        return {
+          mediaType: MT.ANIME,
+          titles: { jp, main: jp || t.main || ogTitle(doc), romaji: t.main, english: t.en || m?.title?.english || null },
+          extraRefs: refs,
+          requestUrl: refs[0]?.url || null,
+          requestNote: [japan || jp ? '' : JP_VERSION_NOTE,
+            refs.length ? '' : 'No AniList or MyAnimeList link found. If you request it, please add one.'].filter(Boolean).join(' '),
+        };
+      },
+      mount: (doc) => panelAt(doc, [['.data > .extra', 'before'], ['#tabbed_pane', 'after']]),
     },
     {
       id: 'imdb',
@@ -670,18 +858,18 @@
       },
       async collect(ref, doc) {
         const main = textOf(doc, '#appHubAppName') || clean(doc.title).replace(/\s+on Steam$/i, '');
-        const { vns, igdb, ja } = await steamLookup(ref.id);
+        const { vns, igdbs, ja } = await steamLookup(ref.id);
         const vnRefs = vns.slice(0, 3).map((v) => ({ linkType: LINK.VNDB, kind: null, id: v.id, url: `https://vndb.org/${v.id}` }));
-        const igdbRef = igdb ? { linkType: LINK.IGDB, kind: null, id: igdb.toLowerCase(), url: `https://www.igdb.com/games/${igdb}` } : null;
+        const igdbRefs = igdbs.map((g) => ({ linkType: LINK.IGDB, kind: null, id: g.toLowerCase(), url: `https://www.igdb.com/games/${g}` }));
         const vn = vns.length === 1 ? vns[0] : null;
         const jp = [vn?.alttitle, ja].find(hasJapanese) || null;
-        const requestUrl = (vnRefs.length === 1 ? vnRefs[0] : igdbRef)?.url || null;
+        const requestUrl = (vnRefs.length === 1 ? vnRefs[0] : igdbRefs[0])?.url || null;
         // VNDB has nearly every VN on Steam; Steam's tags catch ones it hasn't added yet.
         const isVn = vns.length > 0 || steamVnTagged(steamTags(doc));
         return {
           mediaType: isVn ? MT.VN : MT.VIDEOGAME,
           titles: { jp, main, romaji: vn?.title || null, english: main },
-          extraRefs: [...vnRefs, ...(igdbRef ? [igdbRef] : [])],
+          extraRefs: [...vnRefs, ...igdbRefs],
           requestUrl,
           requestNote: [steamHasJapaneseText(doc) ? '' : JP_VERSION_NOTE,
             requestUrl ? '' : 'No IGDB link found. If you request it, please add one.'].filter(Boolean).join(' '),
@@ -862,6 +1050,7 @@
     'graphql.anilist.co': { name: 'AniList', gap: 700 },
     'api.vndb.org': { name: 'VNDB', gap: 1500 },
     'query.wikidata.org': { name: 'Wikidata', gap: 1000 },
+    'www.wikidata.org': { name: 'Wikidata', gap: 200 },
   };
   const MAX_RETRY_WAIT = 10000;
   const hostState = {};
@@ -940,7 +1129,7 @@
   }
 
   async function anilistMedia(by, id, kind) {
-    const q = `query($id:Int,$type:MediaType){Media(${by}:$id,type:$type){id idMal type format countryOfOrigin synonyms title{native romaji english}}}`;
+    const q = `query($id:Int,$type:MediaType){Media(${by}:$id,type:$type){id idMal type format isAdult countryOfOrigin synonyms title{native romaji english}}}`;
     try {
       const r = await request({
         method: 'POST', url: 'https://graphql.anilist.co',
@@ -954,13 +1143,59 @@
     }
   }
 
+  function anilistPick(list, titles, year) {
+    const want = new Set(titles.map(normalizeTitle).filter(Boolean));
+    const hits = list.filter((m) => (!year || !m.startDate?.year || m.startDate.year === year)
+      && [m.title?.native, m.title?.romaji, m.title?.english, ...(m.synonyms || [])].some((t) => want.has(normalizeTitle(t))));
+    return hits.length === 1 ? hits[0] : null;
+  }
+
+  async function anilistFindAnime(titles, year) {
+    const q = 'query($s:String){Page(perPage:8){media(search:$s,type:ANIME){id idMal isAdult format startDate{year} title{native romaji english} synonyms}}}';
+    try {
+      const r = await request({
+        method: 'POST', url: 'https://graphql.anilist.co',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query: q, variables: { s: titles[0] } }),
+      });
+      return anilistPick(r?.data?.Page?.media || [], titles, year);
+    } catch { return null; }
+  }
+
   // Steam app → VNDB (visual novels) and Wikidata (IGDB id, Japanese title).
   const vndbSteamVns = (r) => [...new Map((r?.results || []).flatMap((rel) => rel.vns || []).map((v) => [v.id, v])).values()];
 
-  function wikidataSteam(r) {
-    const rows = r?.results?.bindings || [];
-    const value = (k) => rows.map((b) => b[k]?.value).find(Boolean) || null;
-    return { igdb: value('igdb'), ja: value('ja') };
+  const wikidataValue = (r, k) => (r?.results?.bindings || []).map((b) => b[k]?.value).find(Boolean) || null;
+  const WIKIDATA_UA = { 'Api-User-Agent': `${CLIENT_NAME} (https://github.com/nerenar/jiten-everywhere)` };
+
+  const wikidataQuery = (query) => request({
+    url: `https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`,
+    headers: { Accept: 'application/sparql-results+json', ...WIKIDATA_UA },
+  });
+
+  // The query service can take seconds; the search index doesn't. claimValues applies its rank rules.
+  function claimValues(entity, prop) {
+    const claims = (entity?.claims?.[prop] || []).filter((c) => c.rank !== 'deprecated' && c.mainsnak?.datavalue);
+    const best = claims.some((c) => c.rank === 'preferred') ? claims.filter((c) => c.rank === 'preferred') : claims;
+    return best.map((c) => c.mainsnak.datavalue.value).filter((v) => typeof v === 'string');
+  }
+
+  async function wikidataItemsWith(prop, values) {
+    const api = (params) => request({
+      url: `https://www.wikidata.org/w/api.php?format=json&formatversion=2&${new URLSearchParams(params)}`,
+      headers: { Accept: 'application/json', ...WIKIDATA_UA },
+    });
+    const search = await api({ action: 'query', list: 'search', srlimit: 5, srprop: '',
+      srsearch: `haswbstatement:"${values.map((v) => `${prop}=${v}`).join('|')}"` });
+    const ids = (search?.query?.search || []).map((h) => h.title).filter((t) => /^Q\d+$/.test(t));
+    if (!ids.length) return [];
+    const r = await api({ action: 'wbgetentities', ids: ids.join('|'), props: 'claims|labels', languages: 'ja' });
+    return ids.map((id) => r?.entities?.[id]).filter((e) => claimValues(e, prop).some((v) => values.includes(v)));
+  }
+
+  function wikidataSteam(items) {
+    const first = (f) => items.map(f).find(Boolean) || null;
+    return { igdbs: [...new Set(items.flatMap((e) => claimValues(e, 'P5794')))].slice(0, 3), ja: first((e) => e.labels?.ja?.value) };
   }
 
   async function steamLookup(appId) {
@@ -969,14 +1204,56 @@
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ filters: ['extlink', '=', ['steam', Number(appId)]], fields: 'vns.id,vns.title,vns.alttitle', results: 10 }),
     }).then(vndbSteamVns, () => []);
-    const query = `SELECT ?igdb ?ja WHERE { ?item wdt:P1733 "${Number(appId)}". OPTIONAL { ?item wdt:P5794 ?igdb }
-      OPTIONAL { ?item rdfs:label ?ja FILTER(LANG(?ja) = "ja") } } LIMIT 5`;
-    const wikidata = request({
-      url: `https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`,
-      headers: { Accept: 'application/sparql-results+json', 'Api-User-Agent': `${CLIENT_NAME} (https://github.com/nerenar/jiten-everywhere)` },
-    }).then(wikidataSteam, () => ({ igdb: null, ja: null }));
+    const wikidata = wikidataItemsWith('P1733', [String(Number(appId))]).then(wikidataSteam, () => ({ igdbs: [], ja: null }));
     const [vns, wd] = await Promise.all([vndb, wikidata]);
     return { vns, ...wd };
+  }
+
+  function wikidataMdl(r) {
+    const imdb = wikidataValue(r, 'imdb');
+    return { imdb: /^tt\d+$/.test(imdb || '') ? imdb : null, tv: wikidataValue(r, 'tv'), movie: wikidataValue(r, 'movie') };
+  }
+
+  function wikidataMdlItems(items) {
+    const first = (prop, ok = () => true) => items.map((e) => claimValues(e, prop).find(ok)).find(Boolean) || null;
+    return { imdb: first('P345', (v) => /^tt\d+$/.test(v)), tv: first('P4983'), movie: first('P4947') };
+  }
+
+  function wikidataMdlByTitle(r, kind, episodes) {
+    const items = new Map();
+    for (const b of r?.results?.bindings || []) {
+      const it = items.get(b.item?.value) || {};
+      it.tmdb ||= b.tmdb?.value;
+      it.imdb ||= /^tt\d+$/.test(b.imdb?.value || '') ? b.imdb.value : null;
+      it.eps ||= Number(b.eps?.value) || null;
+      items.set(b.item?.value, it);
+    }
+    let list = [...items.values()].filter((it) => it.tmdb);
+    if (list.length > 1 && episodes) list = list.filter((it) => it.eps === episodes);
+    if (list.length !== 1) return null;
+    return { imdb: list[0].imdb || null, tv: kind === 'movie' ? null : list[0].tmdb, movie: kind === 'movie' ? list[0].tmdb : null };
+  }
+
+  async function mdlLookup(id, { slug, titles, year, kind, episodes }) {
+    const none = { imdb: null, tv: null, movie: null };
+    const found = (x) => x.imdb || x.tv || x.movie;
+    const n = Number(id);
+    const quick = await wikidataItemsWith('P3868', [String(n), ...(slug ? [`${n}-${slug}`] : [])]).then(wikidataMdlItems, () => none);
+    if (found(quick)) return quick;
+    // Wikidata may hold an older slug, which only a prefix match on the query service finds. Both
+    // slow queries run at once, the id one winning.
+    const byId = wikidataQuery(`SELECT ?imdb ?tv ?movie WHERE { ?item wdt:P3868 ?m. FILTER(?m = "${n}" || STRSTARTS(?m, "${n}-"))
+      OPTIONAL { ?item wdt:P345 ?imdb } OPTIONAL { ?item wdt:P4983 ?tv } OPTIONAL { ?item wdt:P4947 ?movie } } LIMIT 5`).then(wikidataMdl, () => none);
+    let byTitle = none;
+    if (titles.length && year) {
+      const values = titles.map((t) => `${JSON.stringify(t)}@ja`).join(' ');
+      const query = `SELECT ?item ?tmdb ?imdb ?eps WHERE { VALUES ?t { ${values} } ?item rdfs:label|skos:altLabel ?t; wdt:P495 wd:Q17;
+        wdt:${kind === 'movie' ? 'P4947' : 'P4983'} ?tmdb; wdt:P580|wdt:P577 ?date. FILTER(YEAR(?date) = ${Number(year)})
+        OPTIONAL { ?item wdt:P345 ?imdb } OPTIONAL { ?item wdt:P1113 ?eps } } LIMIT 50`;
+      byTitle = wikidataQuery(query).then((r) => wikidataMdlByTitle(r, kind, episodes) || none, () => none);
+    }
+    const [a, b] = await Promise.all([byId, byTitle]);
+    return found(a) ? a : b;
   }
 
   // ---------------------------------------------------------------------------
@@ -1221,7 +1498,7 @@
 
   const exported = {
     LINK, MT, COMPATIBLE, SITES, localDate, parseLinkKey, sameKey, deckHasLink, matchPage, normalizeTitle, titleStrength,
-    anilistJapaneseTitle, anilistMediaType, vndbSteamVns, wikidataSteam, steamHasJapaneseText, steamVnTagged, malMediaType, screenMediaType, formatTime, formatSpeech, difficultyText,
+    anilistJapaneseTitle, anilistMediaType, vndbSteamVns, wikidataSteam, anidbTitles, wikidataMdl, wikidataMdlItems, wikidataMdlByTitle, claimValues, mdlDetail, anilistPick, steamHasJapaneseText, steamVnTagged, malMediaType, screenMediaType, formatTime, formatSpeech, difficultyText,
     statRows, checkJiten, requestTitle, titleVariants, mainTitlePart, DEFAULTS, siteDefaults, statOrder, STAT_KEYS, deckTitle, bookmeterTitle, seriesTitle, cleanPageTitle,
   };
   if (typeof module === 'object' && module && module.exports) {
@@ -1460,6 +1737,12 @@
   .je-fact{min-width:0;overflow-wrap:anywhere}
   .je-fact-wide{grid-column:1 / -1}
   .je-line .je-status-ctl{vertical-align:middle}
+  table.je-table{border-collapse:separate;border-spacing:0;width:100%}
+  table.je-table th,table.je-table td{text-align:left}
+  table.je-table td[colspan]{color:inherit;padding-right:0}
+  .je-head.je-thead{border-top:0;border-left:0;border-right:0;text-transform:capitalize}
+  .je-head.je-thead .je-icon{color:inherit}
+  .je-table .je-actions{margin:2px 0}
   `;
 
   const SHARED_CSS = `
@@ -1785,6 +2068,11 @@
     select.addEventListener('change', async () => {
       const status = Number(select.value);
       const had = deck.status || 0;
+      if (status === 0 && (deck.listEntry || [2, 5, 3, 4].includes(had))
+        && !window.confirm('Remove this title from your list? Its dates and character counts will be deleted too.')) {
+        select.value = had;
+        return;
+      }
       select.disabled = true;
       note.textContent = '';
       try {
@@ -1891,7 +2179,8 @@
             shown ? 'hide stats' : 'stats'),
           shown?.state === 'loading' && el('div', { class: 'je-note' }, 'Loading…'),
           shown?.state === 'error' && el('div', { class: 'je-warn' }, shown.error.message),
-          shown?.state === 'done' && el('table', { class: 'je-sub' }, statRows([shown.deck], settings.all()).map((r) => el('tr', {}, rowNode(r)))));
+          shown?.state === 'done' && el('table', { class: 'je-sub' }, statRows([shown.deck], settings.all())
+            .map((r) => el('tr', {}, rowNode(r.status ? { ...r, value: statusControl(view, shown.deck) } : r)))));
       });
       if (strong.length) rows.push({ list: true, label: strong.length === 1 ? 'Possible match' : 'Possible matches', value: matchLinks(strong) });
       if (weak.length) rows.push({ list: true, label: 'Similar titles', value: matchLinks(weak) });
@@ -1984,9 +2273,9 @@
       root.append(el('style', {}, css), box);
       return;
     }
-    const look = !floating && view.site.native?.(document);
+    const look = (!floating || view.site.nativeCorner) && view.site.native?.(document);
     if (look) {
-      renderNative(view, box, look, rows, gear, actions);
+      renderNative(view, box, look, rows, gear, actions, toggle);
       root.append(el('style', {}, css), box);
       return;
     }
@@ -2007,13 +2296,17 @@
     root.append(el('style', {}, css), box);
   }
 
-  function renderNative(view, box, look, rows, gear, actions) {
+  function renderNative(view, box, look, rows, gear, actions, toggle) {
     box.classList.add('native');
     const css = (styles) => Object.entries(styles).map(([k, v]) => `${k}:${v}`).join(';');
     if (look.link) box.style.setProperty('--accent', look.link);
     if (look.body.color) box.style.setProperty('--fg', look.body.color);
     const label = (r) => [r.hint ? el('span', { class: 'je-hint', title: r.hint }, r.label) : r.label, ':'];
     let lines;
+    if (look.layout === 'table') {
+      renderTable(view, box, look, rows, gear, actions, css, toggle);
+      return;
+    }
     if (look.layout === 'facts') {
       const fact = (r, wide) => el('div', { class: 'je-fact' + (wide ? ' je-fact-wide' : ''), title: r.bar?.title },
         el('div', { class: 'je-lbl', style: css(look.label || {}) }, r.hint ? el('span', { class: 'je-hint', title: r.hint }, r.label) : r.label),
@@ -2031,6 +2324,42 @@
     box.append(
       el('div', { class: 'je-nhead', style: css(look.head) }, link(JITEN, 'Jiten'), el('span', { class: 'je-sp' }), gear),
       el('div', { style: css(look.body) }, ...lines, actions && el('div', { class: 'je-actions' }, actions)));
+  }
+
+  function renderTable(view, box, look, rows, gear, actions, css, toggle) {
+    const floating = view.mountMode === 'floating';
+    for (const [k, v] of Object.entries(look.box)) if (!floating || !['margin', 'box-shadow'].includes(k)) box.style.setProperty(k, v);
+    if (floating) box.style.margin = '0';
+    const th = (i, attrs, ...c) => el('th', { ...attrs, style: css({ ...look.th, ...(i ? {} : { 'border-top': '0' }) }) }, ...c);
+    const listItemRows = (item) => {
+      const sub = item?.querySelector?.('table.je-sub');
+      if (!sub) return [[null, [item]]];
+      sub.remove();
+      return [[null, [item]], ...[...sub.rows].map((tr) => {
+        const [l, v] = tr.cells;
+        return v ? [[...l.childNodes], [...v.childNodes], tr.title || v.title || null] : [null, [...l.childNodes]];
+      })];
+    };
+    const td = (i, attrs, ...c) => el('td', { ...attrs, style: css({ ...look.td, ...(i ? {} : { 'border-top': '0' }) }) }, ...c);
+    const label = (r) => (r.hint ? el('span', { class: 'je-hint', title: r.hint }, r.label) : r.label);
+    const [status, ...rest] = rows;
+    const trs = [
+      view.result.state === 'found' ? ['Title', [status.value]] : [null, [status.value]],
+      ...rest.flatMap((r) => (r.list ? [[null, [r.label]], ...[].concat(r.value).flatMap(listItemRows)]
+        : [r.label ? [label(r), [r.value, r.bar && barNode(r.bar)], r.bar?.title] : [null, [r.value]]])),
+      ...(actions ? [[null, [actions]]] : []),
+    ].map(([l, value, title], i) => el('tr', { style: i % 2 ? '' : `background-color:${look.odd}`, title },
+      l == null ? td(i, { colspan: 2 }, ...value) : [th(i, {}, l), td(i, {}, ...value)]));
+    box.append(
+      el('div', {
+        class: 'je-head je-thead', style: css({ ...look.head, ...(floating && view.collapsed ? { 'margin-bottom': '0', 'border-bottom': '0' } : {}) }),
+        onclick: (e) => {
+          if (!floating || !view.collapsed || e.composedPath().some((n) => n === gear || n === toggle)) return;
+          e.preventDefault();
+          toggle.click();
+        },
+      }, link(JITEN, 'Jiten'), el('span', { class: 'je-sp' }), gear, toggle),
+      el('div', { class: 'je-body' }, el('table', { class: 'je-table' }, trs)));
   }
 
   function renderRows(view) {

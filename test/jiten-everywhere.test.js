@@ -427,9 +427,10 @@ test('Steam: VNs from VNDB releases, IGDB id and Japanese title from Wikidata', 
   ] });
   assert.deepEqual(vns.map((v) => v.id), ['v12']);
   assert.deepEqual(je.vndbSteamVns({ results: [] }), []);
-  assert.deepEqual(je.wikidataSteam({ results: { bindings: [{ ja: { value: 'スタークエスト' } }, { igdb: { value: 'star-quest' } }] } }),
-    { igdb: 'star-quest', ja: 'スタークエスト' });
-  assert.deepEqual(je.wikidataSteam({ results: { bindings: [] } }), { igdb: null, ja: null });
+  const claim = (value, rank = 'normal') => ({ rank, mainsnak: { datavalue: { value } } });
+  assert.deepEqual(je.wikidataSteam([{ claims: { P5794: [claim('star-quest'), claim('star-quest-deluxe')] } }, { labels: { ja: { value: 'スタークエスト' } } }]),
+    { igdbs: ['star-quest', 'star-quest-deluxe'], ja: 'スタークエスト' });
+  assert.deepEqual(je.wikidataSteam([]), { igdbs: [], ja: null });
 });
 
 test('a page ref with no Jiten link type (Steam) is never looked up by link', async () => {
@@ -466,4 +467,68 @@ test('Steam: DLC, soundtracks and software pages are skipped', () => {
   assert.ok(page(url, doc({ '.blockbg a': crumb('https://store.steampowered.com/search/?term=&snr=1') })));
   assert.equal(page(url, doc({ '.game_area_dlc_bubble, .game_area_soundtrack_bubble': {} })), null);
   assert.equal(page(url, doc({ '.blockbg a': crumb('https://store.steampowered.com/search/?category1=994&snr=1') })), null);
+});
+
+test('MyDramaList title pages, read from the details list', () => {
+  const details = (rows) => ({
+    querySelectorAll: () => rows.map(([label, value]) => ({ textContent: `${label}:`, parentElement: { textContent: `${label}: ${value}` } })),
+  });
+  const jp = details([['Native Title', '星の唄'], ['Country', 'Japan']]);
+  assert.deepEqual(page('https://mydramalist.com/12345-hoshi-no-uta', jp)?.ref,
+    { linkType: null, kind: null, id: '12345', url: 'https://mydramalist.com/12345' });
+  assert.equal(je.mdlDetail(jp, 'Native Title'), '星の唄');
+  assert.equal(je.mdlDetail(jp, 'Type'), null);
+  for (const url of ['https://mydramalist.com/12345-hoshi-no-uta/cast', 'https://mydramalist.com/people/678-someone', 'https://mydramalist.com/search?q=x']) {
+    assert.equal(page(url, jp), null, url);
+  }
+});
+
+test('MyDramaList Wikidata rows give TMDB and IMDb ids', () => {
+  assert.deepEqual(je.wikidataMdl({ results: { bindings: [{ imdb: { value: 'tt1234567' }, tv: { value: '4321' } }] } }),
+    { imdb: 'tt1234567', tv: '4321', movie: null });
+  assert.deepEqual(je.wikidataMdl({ results: { bindings: [{ imdb: { value: 'nm1234567' } }] } }), { imdb: null, tv: null, movie: null });
+});
+
+test('an AniList search hit counts only with an exact title from the same year', () => {
+  const sea = { id: 11, idMal: 21, startDate: { year: 2006 }, title: { native: 'SEA SONG', romaji: 'SEA SONG', english: 'Sea Song' }, synonyms: ['シーソング'] };
+  const sequel = { id: 12, startDate: { year: 2008 }, title: { native: 'SEA SONG II', romaji: 'SEA SONG II' }, synonyms: [] };
+  assert.equal(je.anilistPick([sequel, sea], ['シーソング'], 2006), sea);
+  assert.equal(je.anilistPick([sea], ['シーソング'], 2010), null);
+  assert.equal(je.anilistPick([sea, { ...sea, id: 13 }], ['Sea Song'], null), null);
+  assert.equal(je.anilistPick([sequel], ['Sea Song'], 2008), null);
+});
+
+test('MyDramaList title fallback takes one Wikidata item, the episode count only breaking ties', () => {
+  const row = (item, tmdb, eps, imdb) => ({ item: { value: item }, tmdb: { value: tmdb }, ...(eps ? { eps: { value: String(eps) } } : {}), ...(imdb ? { imdb: { value: imdb } } : {}) });
+  const r = (...bindings) => ({ results: { bindings } });
+  assert.deepEqual(je.wikidataMdlByTitle(r(row('Q1', '4321', null, 'tt1234567'), row('Q1', '4321', 11)), 'tv', 10),
+    { imdb: 'tt1234567', tv: '4321', movie: null });
+  assert.equal(je.wikidataMdlByTitle(r(row('Q1', '4321'), row('Q2', '4322')), 'tv', null), null);
+  assert.deepEqual(je.wikidataMdlByTitle(r(row('Q1', '4321', 11), row('Q2', '4322', 24)), 'tv', 24), { imdb: null, tv: '4322', movie: null });
+  assert.deepEqual(je.wikidataMdlByTitle(r(row('Q3', '1234')), 'movie', null), { imdb: null, tv: null, movie: '1234' });
+  assert.equal(je.wikidataMdlByTitle(r(), 'tv', 11), null);
+});
+
+test('Wikidata claims: deprecated ones skipped, preferred ones first, as the query service does', () => {
+  const claim = (value, rank = 'normal') => ({ rank, mainsnak: { datavalue: { value } } });
+  const e = { claims: { P345: [claim('tt1111111', 'deprecated'), claim('tt2222222'), claim('tt3333333', 'preferred')], P4983: [claim('4321')] } };
+  assert.deepEqual(je.claimValues(e, 'P345'), ['tt3333333']);
+  assert.deepEqual(je.claimValues({ claims: { P345: [claim('tt1111111', 'deprecated'), claim('tt2222222')] } }, 'P345'), ['tt2222222']);
+  assert.deepEqual(je.claimValues(e, 'P4947'), []);
+  assert.deepEqual(je.wikidataMdlItems([e]), { imdb: 'tt3333333', tv: '4321', movie: null });
+  assert.deepEqual(je.wikidataMdlItems([]), { imdb: null, tv: null, movie: null });
+});
+
+test('AniDB anime pages, in all three URL forms', () => {
+  const ref = { linkType: null, kind: null, id: '4321', url: 'https://anidb.net/anime/4321' };
+  for (const url of ['https://anidb.net/anime/4321', 'https://anidb.net/a4321', 'https://anidb.net/perl-bin/animedb.pl?show=anime&aid=4321']) {
+    assert.deepEqual(page(url)?.ref, ref, url);
+  }
+  const typed = (type) => ({ querySelector: (sel) => (sel === 'tr.type td' ? { textContent: type } : null) });
+  assert.deepEqual(page('https://anidb.net/anime/4321', typed('TV Series, 12 episodes'))?.ref, ref);
+  assert.equal(page('https://anidb.net/anime/4321', typed('Music Video, 1 episode')), null);
+  assert.equal(page('https://anidb.net/anime/4321', typed('Other, 3 episodes')), null);
+  for (const url of ['https://anidb.net/anime/4321/relation/graph', 'https://anidb.net/character/55', 'https://anidb.net/perl-bin/animedb.pl?show=character&charid=55']) {
+    assert.equal(page(url), null, url);
+  }
 });

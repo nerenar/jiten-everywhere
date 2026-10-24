@@ -1,12 +1,12 @@
 # Jiten Everywhere
 
-A userscript that shows [Jiten](https://jiten.moe) stats such as character count, difficulty and coverage on [VNDB](https://vndb.org), [AniList](https://anilist.co), [MyAnimeList](https://myanimelist.net), [TMDB](https://www.themoviedb.org), [IMDb](https://www.imdb.com), [Letterboxd](https://letterboxd.com), [Simkl](https://simkl.com), [IGDB](https://www.igdb.com), [Steam](https://store.steampowered.com), [Syosetu](https://syosetu.com) and [Bookmeter](https://bookmeter.com). For works that aren't on Jiten yet, it opens Jiten's request form with the details filled in.
+A userscript that shows [Jiten](https://jiten.moe) stats useful for Japanese learners, such as character count, difficulty and coverage, on [VNDB](https://vndb.org), [AniList](https://anilist.co), [MyAnimeList](https://myanimelist.net), [TMDB](https://www.themoviedb.org), [IMDb](https://www.imdb.com), [Letterboxd](https://letterboxd.com), [Simkl](https://simkl.com), [MyDramaList](https://mydramalist.com), [AniDB](https://anidb.net), [IGDB](https://www.igdb.com), [Steam](https://store.steampowered.com), [Syosetu](https://syosetu.com) and [Bookmeter](https://bookmeter.com). For works that aren't on Jiten yet, it opens Jiten's request form with the details filled in.
 
 A Jiten API key is optional but recommended. It adds your own stats (coverage, progress, unknown words), lets you set your Jiten status from the page, checks for existing requests, and raises the rate limit. Sentence coverage also needs Jiten+.
 
 Stats can be turned on or off and reordered, each site can show the stats in the page, in the bottom right or not at all, and titles can be shown in Romaji (the default, as on Jiten), Japanese or English.
 
-Besides Jiten, the script only contacts [AniList](https://anilist.co) (to match AniList and MyAnimeList pages to each other), and on Steam [VNDB](https://vndb.org) and [Wikidata](https://www.wikidata.org) (to find the game's VNDB or IGDB entry).
+The script only contacts [Jiten](https://jiten.moe), plus [AniList](https://anilist.co), [VNDB](https://vndb.org) and [Wikidata](https://www.wikidata.org) depending on the site you're on.
 
 ## Install
 
